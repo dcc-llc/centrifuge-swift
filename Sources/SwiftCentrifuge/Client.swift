@@ -21,8 +21,8 @@ public enum CentrifugeError: Error {
 public struct CentrifugeClientConfig {
     public var timeout = 5.0
     public var debug = false
-    public var headers = [String:String]()
-    public var tlsSkipVerify = false
+    public var headers = [String: String]()
+    public var allowSelfSigned = true
     public var maxReconnectDelay = 20.0
     public var privateChannelPrefix = "$"
     public var pingInterval = 25.0
@@ -170,41 +170,26 @@ public class CentrifugeClient {
      */
     public func connect() {
         self.syncQueue.async{ [weak self] in
-            guard let strongSelf = self else { return }
-            guard strongSelf.connecting == false else { return }
+            guard
+                let strongSelf = self,
+                let url = URL(string: strongSelf.url),
+                !strongSelf.connecting
+                else { return }
+            
             strongSelf.connecting = true
             strongSelf.needReconnect = true
-            var request = URLRequest(url: URL(string: strongSelf.url)!)
+            var request = URLRequest(url: url)
+            
             for (key, value) in strongSelf.config.headers {
                 request.addValue(value, forHTTPHeaderField: key)
             }
-            let ws = WebSocket(request: request)
-            if strongSelf.config.tlsSkipVerify {
-                ws.disableSSLCertValidation = true
-            }
-            ws.onConnect = { [weak self] in
-                guard let strongSelf = self else { return }
-                strongSelf.onOpen()
-            }
-            ws.onDisconnect = { [weak self] (error: Error?) in
-                guard let strongSelf = self else { return }
-                let decoder = JSONDecoder()
-                var serverDisconnect: CentrifugeDisconnectOptions?
-                if let err = error as? WSError {
-                    do {
-                        let disconnect = try decoder.decode(CentrifugeDisconnectOptions.self, from: err.message.data(using: .utf8)!)
-                        serverDisconnect = disconnect
-                    } catch {}
-                }
-                strongSelf.onClose(serverDisconnect: serverDisconnect)
-                
-            }
-            ws.onData = { [weak self] data in
-                guard let strongSelf = self else { return }
-                strongSelf.onData(data: data)
-            }
+            
+            let ws = WebSocket(request: request, certPinner: FoundationSecurity(allowSelfSigned: strongSelf.config.allowSelfSigned))
+            ws.callbackQueue = strongSelf.syncQueue
+            ws.delegate = strongSelf
+
             strongSelf.conn = ws
-            strongSelf.conn?.connect()
+            ws.connect()
         }
     }
     
@@ -367,78 +352,76 @@ fileprivate extension CentrifugeClient {
 
 fileprivate extension CentrifugeClient {
     func onOpen() {
-        self.syncQueue.async { [weak self] in
-            guard let strongSelf = self else { return }
-            strongSelf.sendConnect(completion: { [weak self] res, error in
-                guard let strongSelf = self else { return }
-                if let err = error {
-                    switch err {
-                    case CentrifugeError.replyError(let code, let message):
-                        if code == 109 {
-                            strongSelf.delegateQueue.addOperation { [weak self] in
-                                guard let strongSelf = self else { return }
-                                strongSelf.delegate?.onRefresh(strongSelf, CentrifugeRefreshEvent()) {[weak self] token in
-                                    guard let strongSelf = self else { return }
-                                    if token != "" {
-                                        strongSelf.token = token
-                                    }
-                                    strongSelf.close(reason: message, reconnect: true)
-                                    return
-                                }
-                            }
-                        } else {
-                            strongSelf.close(reason: "connect error", reconnect: true)
-                            return
-                        }
-                    default:
-                        strongSelf.close(reason: "connect error", reconnect: true)
-                        return
-                    }
-                }
-                
-                if let result = res {
-                    strongSelf.connecting = false
-                    strongSelf.status = .connected
-                    strongSelf.numReconnectAttempts = 0
-                    strongSelf.client = result.client
-                    strongSelf.delegateQueue.addOperation { [weak self] in
-                        guard let strongSelf = self else { return }
-                        strongSelf.delegate?.onConnect(strongSelf, CentrifugeConnectEvent(client: result.client))
-                    }
-                    for cb in strongSelf.connectCallbacks.values {
-                        cb(nil)
-                    }
-                    strongSelf.connectCallbacks.removeAll(keepingCapacity: true)
-                    strongSelf.resubscribe()
-                    strongSelf.startPing()
-                    if result.expires {
-                        strongSelf.startConnectionRefresh(ttl: result.ttl)
-                    }
-                }
-            })
-        }
+		self.sendConnect(completion: { [weak self] res, error in
+			guard let strongSelf = self else { return }
+			if let err = error {
+				switch err {
+					case CentrifugeError.replyError(let code, let message):
+						if code == 109 {
+							strongSelf.delegateQueue.addOperation { [weak self] in
+								guard let strongSelf = self else { return }
+								strongSelf.delegate?.onRefresh(strongSelf, CentrifugeRefreshEvent()) {[weak self] token in
+									guard let strongSelf = self else { return }
+									if token != "" {
+										strongSelf.token = token
+									}
+									strongSelf.close(reason: message, reconnect: true)
+									return
+								}
+							}
+						} else {
+							strongSelf.close(reason: "connect error", reconnect: true)
+							return
+						}
+					default:
+						strongSelf.close(reason: "connect error", reconnect: true)
+						return
+				}
+			}
+
+			if let result = res {
+				strongSelf.connecting = false
+				strongSelf.status = .connected
+				strongSelf.numReconnectAttempts = 0
+				strongSelf.client = result.client
+				strongSelf.delegateQueue.addOperation { [weak self] in
+					guard let strongSelf = self else { return }
+					strongSelf.delegate?.onConnect(strongSelf, CentrifugeConnectEvent(client: result.client))
+				}
+				for cb in strongSelf.connectCallbacks.values {
+					cb(nil)
+				}
+				strongSelf.connectCallbacks.removeAll(keepingCapacity: true)
+				strongSelf.resubscribe()
+				strongSelf.startPing()
+				if result.expires {
+					strongSelf.startConnectionRefresh(ttl: result.ttl)
+				}
+			}
+		})
     }
     
     func onData(data: Data) {
-        self.syncQueue.async { [weak self] in
-            guard let strongSelf = self else { return }
-            strongSelf.handleData(data: data as Data)
-        }
+		guard let replies = try? CentrifugeSerializer.deserializeCommands(data: data) else { return }
+		for reply in replies {
+			if reply.id > 0 {
+				self.opCallbacks[reply.id]?(CentrifugeResolveData(error: nil, reply: reply))
+			} else {
+				try? self.handleAsyncData(data: reply.result)
+			}
+		}
     }
     
     func onClose(serverDisconnect: CentrifugeDisconnectOptions?) {
-        self.syncQueue.async { [weak self] in
-            guard let strongSelf = self else { return }
-            var disconnect: CentrifugeDisconnectOptions = CentrifugeDisconnectOptions(reason: "connection closed", reconnect: true)
-            if let sd = serverDisconnect {
-                disconnect = sd
-            } else if let savedDisconnect = strongSelf.disconnectOpts {
-                disconnect = savedDisconnect
-            }
-            strongSelf.connecting = false
-            strongSelf.disconnectOpts = nil
-            strongSelf.scheduleDisconnect(reason: disconnect.reason, reconnect: disconnect.reconnect)
-        }
+		var disconnect: CentrifugeDisconnectOptions = CentrifugeDisconnectOptions(reason: "connection closed", reconnect: true)
+		if let sd = serverDisconnect {
+			disconnect = sd
+		} else if let savedDisconnect = self.disconnectOpts {
+			disconnect = savedDisconnect
+		}
+		self.connecting = false
+		self.disconnectOpts = nil
+		self.scheduleDisconnect(reason: disconnect.reason, reconnect: disconnect.reconnect)
     }
     
     private func nextCommandId() -> UInt32 {
@@ -1011,4 +994,41 @@ fileprivate extension CentrifugeClient {
             completion(error)
         }
     }
+}
+
+extension CentrifugeClient: WebSocketDelegate {
+    
+    public func didReceive(event: WebSocketEvent, client: WebSocket) {
+        switch event {
+        case .connected:
+            self.onOpen()
+        case.disconnected(let message, _):
+            let serverDisconnect: CentrifugeDisconnectOptions?
+            if let data = message.data(using: .utf8) {
+                let decoder = JSONDecoder()
+                let disconnect = try? decoder.decode(CentrifugeDisconnectOptions.self, from: data)
+                serverDisconnect = disconnect
+            } else {
+                serverDisconnect = nil
+            }
+            self.onClose(serverDisconnect: serverDisconnect)
+        case .text(_):
+            break
+        case .binary(let data):
+            self.onData(data: data)
+        case .pong(_):
+            break
+        case .ping(_):
+            break
+        case .error(_):
+            break
+        case .viabilityChanged(_):
+            break
+        case .reconnectSuggested(_):
+            break
+        case .cancelled:
+            break
+        }
+    }
+
 }
