@@ -15,10 +15,10 @@ public struct CentrifugePublication {
 }
 
 public struct CentrifugeClientInfo {
-    var client: String
-    var user: String
-    var connInfo: Data
-    var chanInfo: Data
+    public var client: String
+    public var user: String
+    public var connInfo: Data
+    public var chanInfo: Data
 }
 
 public struct CentrifugePresenceStats {
