@@ -159,6 +159,7 @@ message UnsubscribeResult {}
 message PublishRequest {
     string channel = 1;
     bytes data = 2;
+    map<string, SubscribeRequest> subs = 3;
 }
 
 message PublishResult {}
