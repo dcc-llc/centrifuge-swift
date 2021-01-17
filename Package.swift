@@ -1,4 +1,4 @@
-// swift-tools-version:4.0
+// swift-tools-version:5.0
 
 import PackageDescription
 
@@ -9,12 +9,13 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/daltoniam/Starscream", from:"3.0.6"),
-        .package(url: "https://github.com/apple/swift-protobuf", from:"1.7.0")
+        .package(url: "https://github.com/apple/swift-protobuf", from:"1.7.0"),
+        .package(url: "https://github.com/apple/swift-logging", from: "1.4.0")
     ],
     targets: [
         .target(
             name: "SwiftCentrifuge",
-            dependencies: ["Starscream", "SwiftProtobuf"]
+            dependencies: ["Starscream", "SwiftProtobuf", "Logging"]
         ),
         .testTarget(
             name: "SwiftCentrifugeTests",

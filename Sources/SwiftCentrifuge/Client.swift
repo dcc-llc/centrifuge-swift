@@ -9,6 +9,7 @@
 import Foundation
 import Starscream
 import SwiftProtobuf
+import Logging
 
 public enum CentrifugeError: Error {
     case timeout
@@ -26,6 +27,7 @@ public struct CentrifugeClientConfig {
     public var maxReconnectDelay = 20.0
     public var privateChannelPrefix = "$"
     public var pingInterval = 25.0
+	public var logLevel: Logger.Level = .error
     
     public init() {}
 }
@@ -178,31 +180,13 @@ public class CentrifugeClient {
             for (key, value) in strongSelf.config.headers {
                 request.addValue(value, forHTTPHeaderField: key)
             }
-            let ws = WebSocket(request: request)
-            if strongSelf.config.tlsSkipVerify {
-                ws.disableSSLCertValidation = true
-            }
-            ws.onConnect = { [weak self] in
-                guard let strongSelf = self else { return }
-                strongSelf.onOpen()
-            }
-            ws.onDisconnect = { [weak self] (error: Error?) in
-                guard let strongSelf = self else { return }
-                let decoder = JSONDecoder()
-                var serverDisconnect: CentrifugeDisconnectOptions?
-                if let err = error as? WSError {
-                    do {
-                        let disconnect = try decoder.decode(CentrifugeDisconnectOptions.self, from: err.message.data(using: .utf8)!)
-                        serverDisconnect = disconnect
-                    } catch {}
-                }
-                strongSelf.onClose(serverDisconnect: serverDisconnect)
-                
-            }
-            ws.onData = { [weak self] data in
-                guard let strongSelf = self else { return }
-                strongSelf.onData(data: data)
-            }
+			let ws: WebSocket
+			if #available(iOS 13, *) {
+				ws = NativeWebSocket(request: request, logLevel: strongSelf.config.logLevel)
+			} else {
+				ws = StarscreamWebSocket(request: request, tlsSkipVerify: strongSelf.config.tlsSkipVerify)
+			}
+			ws.delegate = self
             strongSelf.conn = ws
             strongSelf.conn?.connect()
         }
@@ -1011,4 +995,18 @@ fileprivate extension CentrifugeClient {
             completion(error)
         }
     }
+}
+
+extension CentrifugeClient: WebSocketDelegate {
+	func webSocketDidConnect() {
+		onOpen()
+	}
+
+	func webSocketDidDisconnect(_ error: Error?, _ disconnectOpts: CentrifugeDisconnectOptions?) {
+		onClose(serverDisconnect: disconnectOpts)
+	}
+
+	func webSocketDidReceiveData(_ data: Data) {
+		onData(data: data)
+	}
 }

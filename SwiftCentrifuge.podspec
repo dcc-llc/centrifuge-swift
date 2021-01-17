@@ -1,7 +1,7 @@
 Pod::Spec.new do |s|
     s.name                  = 'SwiftCentrifuge'
     s.module_name           = 'SwiftCentrifuge'
-    s.swift_version         = '4.2'
+    s.swift_version         = '5'
     s.version               = '0.2.1'
 
     s.homepage              = 'https://github.com/centrifugal/centrifuge-swift'
@@ -17,4 +17,5 @@ Pod::Spec.new do |s|
 
     s.dependency 'SwiftProtobuf'
     s.dependency 'Starscream', '~> 3'
+    s.dependency 'Logging', '~> 1'
 end
