@@ -8,7 +8,6 @@
 import Foundation
 import Logging
 
-
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 final class NativeWebSocket: NSObject, WebSocket, URLSessionWebSocketDelegate {
     weak var delegate: WebSocketDelegate?

@@ -4,6 +4,8 @@
 //
 //
 
+import Foundation
+
 protocol WebSocketDelegate: AnyObject {
     func webSocketDidConnect()
     
