@@ -28,6 +28,7 @@ public struct CentrifugeClientConfig {
     public var privateChannelPrefix = "$"
     public var pingInterval = 25.0
 	public var logLevel: Logger.Level = .error
+	public var useNativeWebSockets: Bool = false
     
     public init() {}
 }
@@ -64,6 +65,8 @@ public class CentrifugeClient {
     fileprivate var disconnectOpts: CentrifugeDisconnectOptions?
     fileprivate var refreshTask: DispatchWorkItem?
     fileprivate var connecting = false
+
+	fileprivate var log: Logger
     
     /// Initialize client.
     ///
@@ -79,6 +82,10 @@ public class CentrifugeClient {
         
         let queueID = UUID().uuidString
         self.syncQueue = DispatchQueue(label: "com.centrifugal.centrifuge-swift.sync<\(queueID)>")
+
+		var log = Logger(label: "com.centrifugal.centrifuge-swift.Client")
+		log.logLevel = config.logLevel
+		self.log = log
         
         if let _queue = delegateQueue {
             self.delegateQueue = _queue
@@ -93,6 +100,8 @@ public class CentrifugeClient {
      - parameter token: String
      */
     public func setToken(_ token: String) {
+		log.debug("Setting new token")
+
         self.syncQueue.async { [weak self] in
             guard let strongSelf = self else { return }
             strongSelf.token = token
@@ -106,6 +115,8 @@ public class CentrifugeClient {
      - parameter completion: Completion block
      */
     public func publish(channel: String, data: Data, completion: @escaping (Error?)->()) {
+		log.trace("Publishing data to channel: \(channel)")
+
         self.syncQueue.async { [weak self] in
             guard let strongSelf = self else { return }
             strongSelf.waitForConnect(completion: { [weak self] error in
@@ -173,7 +184,11 @@ public class CentrifugeClient {
     public func connect() {
         self.syncQueue.async{ [weak self] in
             guard let strongSelf = self else { return }
-            guard strongSelf.connecting == false else { return }
+            guard strongSelf.connecting == false else {
+				strongSelf.log.debug("Already connecting...")
+				return
+			}
+			strongSelf.log.debug("Connecting...")
             strongSelf.connecting = true
             strongSelf.needReconnect = true
             var request = URLRequest(url: URL(string: strongSelf.url)!)
@@ -181,9 +196,11 @@ public class CentrifugeClient {
                 request.addValue(value, forHTTPHeaderField: key)
             }
 			let ws: WebSocket
-			if #available(iOS 13, *) {
+			if #available(iOS 13, *), strongSelf.config.useNativeWebSockets {
+				strongSelf.log.debug("Selected native socket implementation (via URLSessionWebSocketTask)")
 				ws = NativeWebSocket(request: request, logLevel: strongSelf.config.logLevel)
 			} else {
+				strongSelf.log.debug("Selected Starscream socket implementation")
 				ws = StarscreamWebSocket(request: request, tlsSkipVerify: strongSelf.config.tlsSkipVerify)
 			}
 			ws.delegate = self
@@ -198,6 +215,7 @@ public class CentrifugeClient {
     public func disconnect() {
         self.syncQueue.async { [weak self] in
             guard let strongSelf = self else { return }
+			strongSelf.log.debug("Disconnected")
             strongSelf.needReconnect = false
             strongSelf.close(reason: "clean disconnect", reconnect: false)
         }
@@ -252,12 +270,16 @@ internal extension CentrifugeClient {
     func refreshWithToken(token: String) {
         self.syncQueue.async { [weak self] in
             guard let strongSelf = self else { return }
+			strongSelf.log.debug("Requested token refresh")
             strongSelf.token = token
             strongSelf.sendRefresh(token: token, completion: { result, error in
-                if let _ = error {
+				if let error = error {
+					strongSelf.log.debug("Failed to refresh token: \(error)")
                     strongSelf.close(reason: "refresh error", reconnect: true)
                     return
-                }
+				} else {
+					strongSelf.log.debug("Refreshed token")
+				}
                 if let res = result {
                     if res.expires {
                         strongSelf.startConnectionRefresh(ttl: res.ttl)
@@ -338,8 +360,9 @@ internal extension CentrifugeClient {
     }
     
     func close(reason: String, reconnect: Bool) {
-        self.disconnectOpts = CentrifugeDisconnectOptions(reason: reason, reconnect: reconnect)
-        self.conn?.disconnect()
+        disconnectOpts = CentrifugeDisconnectOptions(reason: reason, reconnect: reconnect)
+		log.debug("Closed with reason: \(reason), reconnect: \(reconnect)")
+        conn?.disconnect()
     }
 }
 
@@ -356,12 +379,13 @@ fileprivate extension CentrifugeClient {
             strongSelf.sendConnect(completion: { [weak self] res, error in
                 guard let strongSelf = self else { return }
                 if let err = error {
+					strongSelf.log.debug("Failed to connect, error: \(err)")
                     switch err {
                     case CentrifugeError.replyError(let code, let message):
                         if code == 109 {
                             strongSelf.delegateQueue.addOperation { [weak self] in
                                 guard let strongSelf = self else { return }
-                                strongSelf.delegate?.onRefresh(strongSelf, CentrifugeRefreshEvent()) {[weak self] token in
+                                strongSelf.delegate?.onRefresh(strongSelf, CentrifugeRefreshEvent()) { [weak self] token in
                                     guard let strongSelf = self else { return }
                                     if token != "" {
                                         strongSelf.token = token
@@ -381,6 +405,7 @@ fileprivate extension CentrifugeClient {
                 }
                 
                 if let result = res {
+					strongSelf.log.debug("Connected")
                     strongSelf.connecting = false
                     strongSelf.status = .connected
                     strongSelf.numReconnectAttempts = 0
@@ -421,6 +446,9 @@ fileprivate extension CentrifugeClient {
             }
             strongSelf.connecting = false
             strongSelf.disconnectOpts = nil
+
+			strongSelf.log.debug("Disconnecting, reason: \(disconnect.reason), reconnect: \(disconnect.reconnect)")
+
             strongSelf.scheduleDisconnect(reason: disconnect.reason, reconnect: disconnect.reconnect)
         }
     }
@@ -513,13 +541,16 @@ fileprivate extension CentrifugeClient {
             // TODO: add jitter here
             let delay = 0.05 + min(pow(Double(strongSelf.numReconnectAttempts), 2), strongSelf.config.maxReconnectDelay)
             strongSelf.numReconnectAttempts += 1
+			strongSelf.log.debug("Scheduling WebSocket reconnect, delay: \(delay)")
             strongSelf.syncQueue.asyncAfter(deadline: .now() + delay, execute: { [weak self] in
                 guard let strongSelf = self else { return }
                 strongSelf.syncQueue.async { [weak self] in
                     guard let strongSelf = self else { return }
                     if strongSelf.needReconnect {
+						strongSelf.log.debug("Reconnecting WebSocket...")
                         strongSelf.conn?.connect()
                     } else {
+						strongSelf.log.debug("Reconnecting WebSocket disabled")
                         strongSelf.connecting = false
                     }
                 }
@@ -636,6 +667,7 @@ fileprivate extension CentrifugeClient {
     }
     
     private func startConnectionRefresh(ttl: UInt32) {
+		log.debug("Schedule connection refresh, ttl: \(ttl)")
         let refreshTask = DispatchWorkItem { [weak self] in
             self?.delegateQueue.addOperation {
                 guard let strongSelf = self else { return }
@@ -999,10 +1031,12 @@ fileprivate extension CentrifugeClient {
 
 extension CentrifugeClient: WebSocketDelegate {
 	func webSocketDidConnect() {
+		log.debug("WebSocket connected")
 		onOpen()
 	}
 
 	func webSocketDidDisconnect(_ error: Error?, _ disconnectOpts: CentrifugeDisconnectOptions?) {
+		log.debug("WebSocket disconnected, error: \(error.map({ "\($0)" })  ?? "<nil>")")
 		onClose(serverDisconnect: disconnectOpts)
 	}
 
