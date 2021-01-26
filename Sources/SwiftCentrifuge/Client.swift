@@ -201,7 +201,7 @@ public class CentrifugeClient {
 				ws = NativeWebSocket(request: request, logLevel: strongSelf.config.logLevel)
 			} else {
 				strongSelf.log.debug("Selected Starscream socket implementation")
-				ws = StarscreamWebSocket(request: request, tlsSkipVerify: strongSelf.config.tlsSkipVerify)
+				ws = StarscreamReinstantiatingWebSocket(request: request, tlsSkipVerify: strongSelf.config.tlsSkipVerify)
 			}
 			ws.delegate = self
             strongSelf.conn = ws
