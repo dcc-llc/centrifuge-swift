@@ -541,19 +541,16 @@ fileprivate extension CentrifugeClient {
             let delay = 0.05 + min(pow(Double(strongSelf.numReconnectAttempts), 2), strongSelf.config.maxReconnectDelay)
             strongSelf.numReconnectAttempts += 1
 			strongSelf.log.debug("Scheduling WebSocket reconnect, delay: \(delay)")
-            strongSelf.syncQueue.asyncAfter(deadline: .now() + delay, execute: { [weak self] in
-                guard let strongSelf = self else { return }
-                strongSelf.syncQueue.async { [weak self] in
-                    guard let strongSelf = self else { return }
-                    if strongSelf.needReconnect {
-						strongSelf.log.debug("Reconnecting WebSocket...")
-                        strongSelf.conn?.connect()
-                    } else {
-						strongSelf.log.debug("Reconnecting WebSocket disabled")
-                        strongSelf.connecting = false
-                    }
-                }
-            })
+			strongSelf.syncQueue.asyncAfter(deadline: .now() + delay, execute: { [weak self] in
+				guard let strongSelf = self else { return }
+				if strongSelf.needReconnect {
+					strongSelf.log.debug("Reconnecting WebSocket...")
+					strongSelf.conn?.connect()
+				} else {
+					strongSelf.log.debug("Reconnecting WebSocket disabled")
+					strongSelf.connecting = false
+				}
+			})
         }
     }
     

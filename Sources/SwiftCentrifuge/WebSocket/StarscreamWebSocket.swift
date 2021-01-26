@@ -90,9 +90,15 @@ final class StarscreamReinstantiatingWebSocket: WebSocket {
 	}
 
 	func disconnect() {
-		// Don't unregister event callbacks here, wait for the disconnection event
-		socket?.disconnect()
-		socket = nil
+		guard let socket = socket else { return }
+		unregisterDelegate(from: socket)
+		delegate?.webSocketDidDisconnect(nil, nil)
+		// WARNING! Websocket might not be properly closed in this case.
+		// Reason: the object could be removed from the memory before sending
+		// proper closing commands.
+		// Check if this brings any problems
+		socket.disconnect()
+		self.socket = nil
 	}
 
 	func write(data: Data) {
