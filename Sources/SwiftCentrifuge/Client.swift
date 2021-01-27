@@ -182,7 +182,7 @@ public class CentrifugeClient {
      Connect to server
      */
     public func connect() {
-        self.syncQueue.async{ [weak self] in
+        self.syncQueue.async { [weak self] in
             guard let strongSelf = self else { return }
             guard strongSelf.connecting == false else {
 				strongSelf.log.debug("Already connecting...")
@@ -201,7 +201,10 @@ public class CentrifugeClient {
 				ws = NativeWebSocket(request: request, logLevel: strongSelf.config.logLevel)
 			} else {
 				strongSelf.log.debug("Selected Starscream socket implementation")
-				ws = StarscreamReinstantiatingWebSocket(request: request, tlsSkipVerify: strongSelf.config.tlsSkipVerify)
+				ws = StarscreamReinstantiatingWebSocket(
+					request: request,
+					tlsSkipVerify: strongSelf.config.tlsSkipVerify,
+					queue: strongSelf.syncQueue)
 			}
 			ws.delegate = self
             strongSelf.conn = ws
@@ -374,13 +377,11 @@ fileprivate extension CentrifugeClient {
 
 fileprivate extension CentrifugeClient {
     func onOpen() {
-        self.syncQueue.async { [weak self] in
+        sendConnect(completion: { [weak self] res, error in
             guard let strongSelf = self else { return }
-            strongSelf.sendConnect(completion: { [weak self] res, error in
-                guard let strongSelf = self else { return }
-                if let err = error {
-					strongSelf.log.debug("Failed to connect, error: \(err)")
-                    switch err {
+            if let err = error {
+                strongSelf.log.debug("Failed to connect, error: \(err)")
+                switch err {
                     case CentrifugeError.replyError(let code, let message):
                         if code == 109 {
                             strongSelf.delegateQueue.addOperation { [weak self] in
@@ -401,55 +402,54 @@ fileprivate extension CentrifugeClient {
                     default:
                         strongSelf.close(reason: "connect error", reconnect: true)
                         return
-                    }
                 }
-                
-                if let result = res {
-					strongSelf.log.debug("Connected")
-                    strongSelf.connecting = false
-                    strongSelf.status = .connected
-                    strongSelf.numReconnectAttempts = 0
-                    strongSelf.client = result.client
-                    strongSelf.delegateQueue.addOperation { [weak self] in
-                        guard let strongSelf = self else { return }
-                        strongSelf.delegate?.onConnect(strongSelf, CentrifugeConnectEvent(client: result.client))
-                    }
-                    for cb in strongSelf.connectCallbacks.values {
-                        cb(nil)
-                    }
-                    strongSelf.connectCallbacks.removeAll(keepingCapacity: true)
-                    strongSelf.resubscribe()
-                    strongSelf.startPing()
-                    if result.expires {
-                        strongSelf.startConnectionRefresh(ttl: result.ttl)
-                    }
+            }
+
+            if let result = res {
+                strongSelf.log.debug("Connected")
+                strongSelf.connecting = false
+                strongSelf.status = .connected
+                strongSelf.numReconnectAttempts = 0
+                strongSelf.client = result.client
+                strongSelf.delegateQueue.addOperation { [weak self] in
+                    guard let strongSelf = self else { return }
+                    strongSelf.delegate?.onConnect(strongSelf, CentrifugeConnectEvent(client: result.client))
                 }
-            })
-        }
+                for cb in strongSelf.connectCallbacks.values {
+                    cb(nil)
+                }
+                strongSelf.connectCallbacks.removeAll(keepingCapacity: true)
+                strongSelf.resubscribe()
+                strongSelf.startPing()
+                if result.expires {
+                    strongSelf.startConnectionRefresh(ttl: result.ttl)
+                }
+            }
+        })
     }
     
     func onData(data: Data) {
-        self.syncQueue.async { [weak self] in
-            guard let strongSelf = self else { return }
-            strongSelf.handleData(data: data as Data)
+        guard let replies = try? CentrifugeSerializer.deserializeCommands(data: data) else { return }
+        for reply in replies {
+            if reply.id > 0 {
+                self.opCallbacks[reply.id]?(CentrifugeResolveData(error: nil, reply: reply))
+            } else {
+                try? self.handleAsyncData(data: reply.result)
+            }
         }
     }
     
     func onClose(serverDisconnect: CentrifugeDisconnectOptions?) {
-        self.syncQueue.async { [weak self] in
-            guard let strongSelf = self else { return }
+        let disconnect: CentrifugeDisconnectOptions = serverDisconnect
+            ?? disconnectOpts
+            ?? CentrifugeDisconnectOptions(reason: "connection closed", reconnect: true)
 
-            let disconnect: CentrifugeDisconnectOptions = serverDisconnect
-                ?? strongSelf.disconnectOpts
-                ?? CentrifugeDisconnectOptions(reason: "connection closed", reconnect: true)
+        connecting = false
+        disconnectOpts = nil
 
-            strongSelf.connecting = false
-            strongSelf.disconnectOpts = nil
+        log.debug("Disconnecting, reason: \(disconnect.reason), reconnect: \(disconnect.reconnect)")
 
-			strongSelf.log.debug("Disconnecting, reason: \(disconnect.reason), reconnect: \(disconnect.reconnect)")
-
-            strongSelf.scheduleDisconnect(reason: disconnect.reason, reconnect: disconnect.reconnect)
-        }
+        scheduleDisconnect(reason: disconnect.reason, reconnect: disconnect.reconnect)
     }
     
     private func nextCommandId() -> UInt32 {
@@ -613,17 +613,6 @@ fileprivate extension CentrifugeClient {
             let message = try Proto_Message(serializedData: push.data)
             self.delegateQueue.addOperation {
                 self.delegate?.onMessage(self, CentrifugeMessageEvent(data: message.data))
-            }
-        }
-    }
-    
-    private func handleData(data: Data) {
-        guard let replies = try? CentrifugeSerializer.deserializeCommands(data: data) else { return }
-        for reply in replies {
-            if reply.id > 0 {
-                self.opCallbacks[reply.id]?(CentrifugeResolveData(error: nil, reply: reply))
-            } else {
-                try? self.handleAsyncData(data: reply.result)
             }
         }
     }
