@@ -1033,7 +1033,14 @@ extension CentrifugeClient: WebSocketDelegate {
 
 	func webSocketDidDisconnect(_ error: Error?, _ disconnectOpts: CentrifugeDisconnectOptions?) {
 		log.debug("WebSocket disconnected, error: \(error.map({ "\($0)" })  ?? "<nil>")")
-		onClose(serverDisconnect: disconnectOpts)
+
+        if var opts = disconnectOpts, !opts.reconnect {
+            log.error("Detected 'stale connection' error. Ignoring reconnection restriction at the moment...")
+            opts.reconnect = true
+            onClose(serverDisconnect: opts)
+        } else {
+            onClose(serverDisconnect: disconnectOpts)
+        }
 	}
 
 	func webSocketDidReceiveData(_ data: Data) {
